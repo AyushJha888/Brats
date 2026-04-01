@@ -1,0 +1,70 @@
+# ============================================================
+#  .gitignore — BraTS / MR-RATE Diffusion Model
+# ============================================================
+
+# ── Medical imaging data ─────────────────────────────────────
+# NIfTI volumes (raw and compressed) — large binary files
+*.nii
+*.nii.gz
+
+# Raw data directories
+brain_only/
+BraTS2020_TrainingData/
+4IJW45J4TC/
+
+# Archive files used for initial download
+*.zip
+
+# ── Model checkpoints & weights ──────────────────────────────
+logs/checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# ── Log outputs (keep JSONs, ignore figures & tensorboard) ───
+logs/figures/
+logs/runs/
+runs/
+tensorboard/
+
+# ── Jupyter notebook outputs & caches ────────────────────────
+# Strip outputs before committing (keep cell structure)
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# ── Python environment ────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+.env
+*.egg-info/
+dist/
+build/
+
+# ── OS & editor files ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# ── Temp / scratch files ──────────────────────────────────────
+_build_*.py
+*.tmp
+*.bak
+
+# ── What IS tracked ──────────────────────────────────────────
+# (override ignores above for these specific files)
+!logs/.gitkeep
+!logs/figures/.gitkeep
+!logs/checkpoints/.gitkeep
+!logs/data_validation.json
+!logs/thin_slice_split.json
+!logs/lora_training_log.json

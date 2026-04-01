@@ -54,7 +54,6 @@ build/
 
 # ── Claude Code internal files ───────────────────────────────
 .claude/
-.workspace
 
 # ── OS & editor files ─────────────────────────────────────────
 .DS_Store

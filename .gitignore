@@ -11,9 +11,16 @@
 brain_only/
 BraTS2020_TrainingData/
 4IJW45J4TC/
+chest/
+dump/
 
 # Archive files used for initial download
 *.zip
+
+# Image data files
+*.jpg
+*.jpeg
+*.png
 
 # ── Model checkpoints & weights ──────────────────────────────
 logs/checkpoints/
@@ -44,6 +51,10 @@ env/
 *.egg-info/
 dist/
 build/
+
+# ── Claude Code internal files ───────────────────────────────
+.claude/
+.workspace
 
 # ── OS & editor files ─────────────────────────────────────────
 .DS_Store

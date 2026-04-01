@@ -20,14 +20,19 @@ echo "=============================================="
 # ── 0. System info ───────────────────────────────────────────
 echo ""
 echo "[0/7] System info"
-python3 --version
+PYTHON_BIN=$(command -v python3.12 || command -v python3 || command -v python || true)
+if [ -z "${PYTHON_BIN}" ]; then
+    echo "ERROR: no Python interpreter found"
+    exit 1
+fi
+echo "Using Python: ${PYTHON_BIN} ($(${PYTHON_BIN} --version 2>&1))"
 nvcc --version 2>/dev/null | head -1 || echo "  nvcc not found (checking torch for CUDA)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo "  nvidia-smi unavailable"
 echo ""
 
 # ── 1. Detect CUDA version & pick right torch index ─────────
 echo "[1/7] Detecting CUDA version"
-CUDA_VER=$(python3 -c "
+CUDA_VER=$(${PYTHON_BIN} -c "
 import subprocess, re
 try:
     out = subprocess.check_output(['nvcc','--version']).decode()
@@ -38,31 +43,45 @@ except: print('121')
 ")
 echo "  Detected CUDA version tag: cu${CUDA_VER}"
 
-if [ "$CUDA_VER" = "118" ]; then
-    TORCH_INDEX="https://download.pytorch.org/whl/cu118"
-    TORCH_VER="torch==2.4.1+cu118"
-    TV_VER="torchvision==0.19.1+cu118"
-    TA_VER="torchaudio==2.4.1+cu118"
-else
-    # default: CUDA 12.1 (most RunPod images)
-    TORCH_INDEX="https://download.pytorch.org/whl/cu121"
-    TORCH_VER="torch==2.4.1+cu121"
-    TV_VER="torchvision==0.19.1+cu121"
-    TA_VER="torchaudio==2.4.1+cu121"
-fi
+case "${CUDA_VER}" in
+    118)
+        TORCH_INDEX="https://download.pytorch.org/whl/cu118"
+        TORCH_VER="torch==2.4.1+cu118"
+        TV_VER="torchvision==0.19.1+cu118"
+        TA_VER="torchaudio==2.4.1+cu118"
+        ;;
+    121)
+        TORCH_INDEX="https://download.pytorch.org/whl/cu121"
+        TORCH_VER="torch==2.4.1+cu121"
+        TV_VER="torchvision==0.19.1+cu121"
+        TA_VER="torchaudio==2.4.1+cu121"
+        ;;
+    128)
+        TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+        TORCH_VER="torch==2.11.0+cu128"
+        TV_VER="torchvision==0.26.0+cu128"
+        TA_VER="torchaudio==2.11.0+cu128"
+        ;;
+    *)
+        TORCH_INDEX="https://download.pytorch.org/whl/cu121"
+        TORCH_VER="torch==2.4.1+cu121"
+        TV_VER="torchvision==0.19.1+cu121"
+        TA_VER="torchaudio==2.4.1+cu121"
+        ;;
+esac
 
 # ── 2. Upgrade pip ───────────────────────────────────────────
 echo ""
 echo "[2/7] Upgrading pip"
-python3 -m pip install --upgrade pip -q
+${PYTHON_BIN} -m pip install --upgrade pip 
 
 # ── 3. Install PyTorch (CUDA) ────────────────────────────────
 echo ""
 echo "[3/7] Installing PyTorch with CUDA (${TORCH_VER})"
-python3 -m pip install "${TORCH_VER}" "${TV_VER}" "${TA_VER}" \
-    --index-url "${TORCH_INDEX}" -q
+${PYTHON_BIN} -m pip install "${TORCH_VER}" "${TV_VER}" "${TA_VER}" \
+    --index-url "${TORCH_INDEX}" 
 echo "  Verifying CUDA..."
-python3 -c "
+${PYTHON_BIN} -c "
 import torch
 assert torch.cuda.is_available(), 'CUDA not available after install!'
 print(f'  torch {torch.__version__}  |  CUDA {torch.version.cuda}  |  GPUs: {torch.cuda.device_count()}')
@@ -74,12 +93,12 @@ for i in range(torch.cuda.device_count()):
 # ── 4. Install MONAI + generative deps ───────────────────────
 echo ""
 echo "[4/7] Installing MONAI[all] and utilities"
-python3 -m pip install "monai[all]>=1.3" einops lpips -q
+${PYTHON_BIN} -m pip install --ignore-installed blinker "monai[all]>=1.3" einops lpips 
 
-# ── 5. Install remaining requirements ────────────────────────
+# ── 5. Install remaining requirements ───────────────────────
 echo ""
 echo "[5/8] Installing project requirements"
-python3 -m pip install \
+${PYTHON_BIN} -m pip install \
     nibabel==5.3.3 \
     numpy \
     scipy \
@@ -91,7 +110,7 @@ python3 -m pip install \
     ipywidgets \
     ipykernel \
     "huggingface-hub[hf_xet]" \
-    -q
+    
 
 # ── 6. Set up workspace dirs & move notebooks ─────────────────
 echo ""
@@ -132,7 +151,7 @@ else
     # Login with token if provided
     if [ -n "${HF_TOKEN}" ]; then
         echo "  Logging in with HF_TOKEN..."
-        python3 -c "from huggingface_hub import login; login('${HF_TOKEN}')"
+        ${PYTHON_BIN} -c "from huggingface_hub import login; login('${HF_TOKEN}')"
     else
         echo "  No HF_TOKEN set — attempting anonymous access"
         echo "  (If download fails, run:  export HF_TOKEN=hf_xxx  then re-run)"
@@ -143,7 +162,7 @@ else
     echo "  This will take several minutes on a fast connection..."
     echo ""
 
-    python3 - << 'PYEOF'
+    ${PYTHON_BIN} - << 'PYEOF'
 import os, sys
 from huggingface_hub import HfFileSystem
 
@@ -207,7 +226,7 @@ fi
 # ── 8. Quick smoke test ───────────────────────────────────────
 echo ""
 echo "[8/8] Smoke test"
-python3 - << 'PYEOF'
+${PYTHON_BIN} - << 'PYEOF'
 import torch
 import nibabel
 import monai

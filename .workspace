@@ -1,26 +1,26 @@
 
 # Workspace Context — BraTS / MR-RATE Diffusion Model Project
-Last updated: 2026-04-01
+Last updated: 2026-04-03
 
 ---
 
 ## What We're Building
 
-A **2D slice-based diffusion model** (DDPM/DDIM) with **LoRA fine-tuning**, trained exclusively
-on healthy thin-slice T1w brain MRI from the MR-RATE dataset.
+A **2D slice-based diffusion model** (DDPM/DDIM) with **learned variance (VLB loss)**,
+trained exclusively on healthy thin-slice T1w brain MRI from the MR-RATE dataset.
 **Goal:** Unsupervised anomaly detection — given a diseased slice, reconstruct the healthy
-version and expose pathology as the residual `|x₀ − x̂₀|`.
+version and expose pathology via the residual `|x₀ − x̂₀|` and the model's uncertainty map.
 
 ---
 
 ## Anomaly Detection Pipeline (inference)
 
 ```
-Diseased slice  x₀
+BraTS T1 slice  x₀
       │
       ▼
-Saliency map from ACAT classifier  →  binary mask M
-      │  (rough map of "where pathology probably is")
+Binary mask M  (GT seg or ACAT saliency)
+      │
       ▼
 DDIM encode  →  x_L
       (forward noising applied only inside mask M, to noise level L)
@@ -30,11 +30,14 @@ Hybrid DDPM + DDIM decode  (t = L → 0)
       ├─ inside  M = 1  →  DDPM steps  (stochastic, free to regenerate healthy anatomy)
       └─ outside M = 0  →  DDIM steps  (deterministic, preserves healthy anatomy exactly)
       │
+      ├─ captures uncertainty = exp(log_var) at t=L  (from learned variance head)
       ▼
 Healthy reconstruction  x̂₀
       │
       ▼
-Anomaly map  =  | x₀ − x̂₀ |
+Recon anomaly  = | x₀ − x̂₀ |          (smoothed, σ=2 px)
+Uncertainty    = exp(log σ²) @ t=L     (model confidence map)
+Combined score = recon_anomaly × uncertainty
 ```
 
 **Key inference hyperparameters:**
@@ -70,12 +73,6 @@ After analysing all 210 subjects we found two fundamentally different acquisitio
 | **Thick (excluded)** | 139 | 4–7 mm | 20–30 | 14–25 |
 | **Thin (used)** | 71 | 0.47–1.04 mm | 200–640 | 73–315 |
 
-**Why exclude thick-slice:**
-- Partial-volume effects make each slice look blurry / different from thin-slice
-- Only 14–25 slices per subject → barely enough anatomy
-- Mixing both types would train the model to handle two incompatible appearance modes
-- Confirmed visually in `03_slice_thickness_analysis.ipynb`
-
 **Thin-slice split (deterministic, seed=42, 80/10/10):**
 
 | Split | Subjects | Usable 2D slices |
@@ -87,9 +84,7 @@ After analysing all 210 subjects we found two fundamentally different acquisitio
 
 **Fill rate stats (thin-slice, 15–85% Z window):**
 - 17,594 candidate slices before fill filter
-- Fill rate range: 0.0–45.8% (skull-stripped brain never exceeds ~50% of frame)
-- Mean / median: 18.5% / 18.7%,  Std: 14.6%
-- **28% of candidates dropped** by the 5% fill filter → 12,660 retained
+- **28% dropped** by the 5% fill filter → 12,660 retained
 
 ---
 
@@ -99,26 +94,21 @@ After analysing all 210 subjects we found two fundamentally different acquisitio
 All 210 subjects — raw axial slices         :  28,412  (100%)
   After 15%–85% Z-range filter              :  20,074  (−29.3%)
   After 5% brain-fill filter                :  15,119  (−24.7% of candidates)
-  Overall retention from raw                :   53.2%
 
 Thin-slice only (71 subjects):
-  Candidate slices in 15–85% window         :  17,594
+  Candidate slices in 15%–85% window         :  17,594
   After 5% fill filter                      :  12,660  (72.0% retained)
 ```
-
-**Volume shape diversity (thin-slice):**
-- 40 unique HxW dimensions across subjects — resize to 256×256 is non-trivial
-- Z depth: 200–640 slices; most common XY: 256×256 and 512×512
 
 ---
 
 ## Preprocessing Pipeline — canonical function `preprocess_volume`
 
-Defined in `04_thin_slice_preprocessing.ipynb`, reused verbatim in `05_train_diffusion_lora.ipynb`.
+Defined in `04_thin_slice_preprocessing.ipynb`, reused verbatim in all training/inference notebooks.
 
 ```python
 preprocess_volume(nii_path, target_size=256, z_low=0.15, z_high=0.85, fill_thresh=0.05)
-→ List[Tensor(1, 256, 256), float32, [0,1]]
+→ (List[np.ndarray(1, 256, 256)], List[int])   # slices + z-indices
 ```
 
 Steps:
@@ -127,27 +117,22 @@ Steps:
 3. Z-range filter: keep slices `[floor(D×0.15), ceil(D×0.85))`
 4. Fill filter: discard slice if `count_nonzero / total_pixels < 0.05`
 5. Bilinear resize to `(256, 256)` via `F.interpolate` if shape differs
-6. Return `torch.Tensor` with leading channel dim → `(1, H, W)`
+6. Return list of `np.ndarray (1, H, W)` + matching z-indices
 
 ---
 
-## Dataset Class — `ThinSliceDataset`
+## Dataset Classes
 
-MONAI-compatible `torch.utils.data.Dataset`:
-- Input: list of subject dicts from `discover_thin_subjects()`
-- `__len__` = number of subjects (55 train)
-- `__getitem__` = load full volume → preprocess → pick **one random valid slice**
-- Lazy loading (no pre-caching) — keeps RAM low
-- Epoch size = 55 steps; full pool of 9,540 unique slices exposed over ~173 epochs
+### `ThinSliceDataset` (training — `06_train_from_scratch.ipynb`)
+- Reads pre-cached `.npy` slices from `CACHE_DIR` (built once by `build_disk_cache`)
+- `__getitem__` returns a single `(1, 256, 256)` tensor
+- DataLoader: `batch_size=8`, `num_workers=4`, `drop_last=True`
 
-**MONAI augmentation transforms (train only):**
-- `RandFlip(prob=0.5, spatial_axis=1)` — horizontal flip (anatomically valid)
-- `RandAffine(prob=0.5, rotate=±5°, translate=±5px)` — small geometric jitter
-- `ScaleIntensity(minv=0, maxv=1)` — re-clamps [0,1] after affine warping
-- Val/test: `EnsureType(float32)` only
-
-**DataLoader config:**
-- `batch_size=8`, `shuffle=True`, `num_workers=0` (Windows-safe), `drop_last=True`
+### `BraTSDataset` (inference — `07_inference_healthy_reconstruction.ipynb`)
+- Lazy flat index: one item per valid axial slice across all cases
+- `__getitem__` returns `{image, seg, case, z_idx, has_tumor}`
+- Custom `brats_collate_fn` handles mixed-type batches
+- `tumor_only=True` filters to slices with any non-zero seg label
 
 ---
 
@@ -157,46 +142,68 @@ MONAI-compatible `torch.utils.data.Dataset`:
 |-----------|-------|
 | Framework | MONAI `DiffusionModelUNet` |
 | Spatial dims | 2 (axial slices) |
-| Input/output channels | 1 (T1w grayscale) |
-| Channel hierarchy | 128 → 256 → 256 → 512 |
-| Attention levels | Levels 3 & 4 only (False, False, True, True) |
+| Input channels | 1 (T1w grayscale) |
+| **Output channels** | **2 — ch0: noise_pred ε̂, ch1: log_var (learned variance)** |
+| Channel hierarchy | **128 → 256 → 256 → 512** |
+| Attention levels | **Levels 3 & 4 (False, False, True, True)** |
 | Residual blocks / level | 2 |
-| Attention head channels | 64 |
-| Total base parameters | ~102 M |
-| Training loss | MSE (predicted noise ε̂ vs true noise ε) |
+| Attention head channels | 32 |
+| Norm groups | 32 |
+| Total parameters | ~200 M |
 
 **Diffusion schedulers:**
 - `DDPMScheduler` — used during training and inside-mask decode
 - `DDIMScheduler` — used for DDIM encode and outside-mask decode
-- Both: linear β schedule, β_start=1e-4, β_end=0.02, T=1000 timesteps
+- Both: `schedule="linear_beta"`, β_start=1e-4, β_end=0.02, T=1000 timesteps
 
 ---
 
-## LoRA Fine-Tuning
+## Training Loss
 
-**Why LoRA:**
-- Base model is 102 M params — full fine-tuning is expensive
-- LoRA injects rank-decomposed side branches into attention linears only
-- `W' x = W x + B(Ax) · (α/r)` where only A, B are trained; W is frozen
+Combined MSE + VLB loss (hybrid objective from improved DDPM):
 
-**Implementation:** `LoRALinear` class wraps each `nn.Linear` in attention blocks.
-`inject_lora(model)` walks the module tree and replaces in-place.
+```
+model_out  = unet(x_t, t)          # (B, 2, H, W)
+noise_pred = model_out[:, :1]      # noise channel
+log_var    = model_out[:, 1:].clamp(-20, 20)   # log-variance channel
 
-| Parameter | Value |
-|-----------|-------|
-| Rank `r` | 4 |
-| Alpha `α` | 4.0  (scale = α/r = 1.0) |
-| Target | All `nn.Linear` inside modules named `*attn*` / `*attention*` |
-| Trainable params | ~0.8 M  (<1% of 102 M) |
-| Init | A: kaiming_uniform, B: zeros (output = base at step 0) |
-| Optimizer | AdamW, lr=1e-4, weight_decay=1e-4 |
-| LR schedule | CosineAnnealingLR (T_max=N_epochs, eta_min=lr×0.01) |
-| Grad clipping | 1.0 |
+mse_loss   = MSE(noise_pred, noise)
 
-**Checkpoint strategy:**
-- Full checkpoint every 10 epochs (for training resume)
-- LoRA-only checkpoint (A+B matrices only, ~few MB) for lightweight deployment
-- Load LoRA-only on top of fresh base model for inference
+beta_tilde_t = posterior variance from alphas_cumprod
+vlb_loss   = -0.5 * (1 + log_var - log(beta_tilde_t) - exp(log_var - log(beta_tilde_t)))
+
+loss = mse_loss + 0.001 * vlb_loss
+```
+
+**Why VLB:** gives the model a way to signal per-pixel reconstruction confidence,
+which we read out at inference time as an uncertainty map.
+
+**Training config:**
+- Optimizer: AdamW, lr=1e-4, weight_decay=1e-4
+- LR schedule: CosineAnnealingLR (T_max=N_epochs, eta_min=lr×0.01)
+- Grad clip: 1.0
+- Val metric: noise-prediction MSE only (no VLB term)
+
+**Checkpoint keys:**
+- `epoch`, `unet`, `optimizer`
+- `train_mse_losses` — per-epoch train MSE list
+- `train_vlb_losses` — per-epoch train VLB list
+- `val_losses` — per-epoch val MSE list
+
+---
+
+## Checkpoints
+
+| File | Description |
+|------|-------------|
+| `./diffusion_epoch0030.pt` | 30-epoch baseline (old arch: out_ch=1, channels=(64,128,256,256)) |
+| `./logs/checkpoints/diffusion_best.pt` | Best val-MSE checkpoint (new arch, updated by nb06) |
+| `./logs/checkpoints/diffusion_epochXXXX.pt` | Periodic checkpoints every `SAVE_EVERY` epochs |
+
+**⚠ Architecture mismatch:** `diffusion_epoch0030.pt` uses the OLD architecture
+(`out_channels=1`, `channels=(64,128,256,256)`). New training runs produce checkpoints
+with `out_channels=2`, `channels=(128,256,256,512)`. The comment in nb07 Cell 13
+explains how to load either.
 
 ---
 
@@ -204,9 +211,13 @@ MONAI-compatible `torch.utils.data.Dataset`:
 
 | Function | Signature | Purpose |
 |----------|-----------|---------|
-| `ddim_encode` | `(x0, mask, scheduler, encode_timestep=500)` | Forward-noise x₀ → x_L inside mask only |
-| `hybrid_decode` | `(x_L, x0_orig, mask, unet, ddpm, ddim, start_t=500, n_steps=50)` | Reverse decode: DDPM inside mask, DDIM outside |
-| `anomaly_map` | `(x0, x_hat, smooth_sigma=2.0)` | `\|x₀ − x̂₀\|` with optional Gaussian smoothing |
+| `ddim_encode` | `(x0, mask, scheduler, encode_timestep=500)` | Forward-noise x₀ → x_L inside mask |
+| `hybrid_decode` | `(x_L, x0_orig, mask, unet, ddpm, ddim, start_t, n_steps)` | Returns `(x_hat, uncertainty)` |
+| `anomaly_map` | `(x0, x_hat, smooth_sigma=2.0)` | `\|x₀ − x̂₀\|` with Gaussian smoothing |
+| `denoise_from_noised_sample` | `(x0, encode_t, n_steps=50)` | Full-image noise → denoise, no mask |
+| `generate_from_noise` | `(n_samples, n_steps, seed)` | Unconditional DDIM generation from N(0,I) |
+
+`hybrid_decode` now returns a tuple — callers must unpack: `x_hat, uncert = hybrid_decode(...)`
 
 ---
 
@@ -214,20 +225,20 @@ MONAI-compatible `torch.utils.data.Dataset`:
 
 | Notebook | Status | Key output |
 |----------|--------|-----------|
-| `load_mr_rate_data.ipynb` | ✓ Done | 212 subjects in `brain_only/` |
-| `read_nii.ipynb` | Utility | NIfTI I/O reference |
-| `visualize_brats_modalities.ipynb` | ✓ Done | Interactive multi-modal viewer |
 | `01_data_pipeline.ipynb` | ✓ Done | DataLoader verified, `logs/data_validation.json` |
 | `02_model_setup.ipynb` | ✓ Done | Forward/backward pass + DDIM encode-decode verified |
-| `03_slice_thickness_analysis.ipynb` | ✓ Done | Thick vs thin comparison, fill-rate distribution (Sec 8) |
+| `03_slice_thickness_analysis.ipynb` | ✓ Done | Thick vs thin comparison, fill-rate distribution |
 | `04_thin_slice_preprocessing.ipynb` | ✓ Done | `preprocess_volume`, `ThinSliceDataset`, split JSON |
-| `05_train_diffusion_lora.ipynb` | ✓ Done | LoRA training loop + hybrid inference pipeline |
+| `05_train_diffusion_lora.ipynb` | ✓ Done (superseded) | LoRA variant — superseded by nb06 full training |
+| `06_train_from_scratch.ipynb` | ✓ Updated | Full model, VLB loss, 2-ch output, 30 epochs done |
+| `07_inference_healthy_reconstruction.ipynb` | ✓ Updated | BraTS inference, uncertainty maps, 7-panel viz |
 
 **Next steps:**
-1. Run `05` on GPU — target 500–1000 epochs, monitor val MSE
-2. Integrate ACAT classifier to produce real pathology masks (replace synthetic centre mask)
-3. Evaluate anomaly maps against BraTS segmentations (Dice, AUC)
-4. Tune `ENCODE_T` ∈ {250, 500, 750} and LoRA rank ∈ {4, 8, 16}
+1. Re-train `06` with new arch (out_ch=2) on GPU — target 500–1000 epochs
+2. Load new checkpoint in `07` (swap arch comment back to out_ch=2)
+3. Integrate ACAT classifier to produce real pathology masks
+4. Evaluate combined anomaly score vs BraTS seg: Dice, AUC-ROC, AUPRC
+5. Sweep `ENCODE_T` ∈ {250, 500, 750} and VLB weight ∈ {0.0001, 0.001, 0.01}
 
 ---
 
@@ -237,11 +248,11 @@ MONAI-compatible `torch.utils.data.Dataset`:
 |------|----------|
 | `./brain_only/` | 212 healthy MR-RATE subjects (NIfTI skull-stripped) |
 | `./BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData/` | 371 BraTS glioma cases |
-| `./logs/` | Training logs and validation JSONs |
-| `./logs/figures/` | Saved plots from all notebooks |
-| `./logs/checkpoints/` | Model checkpoints from training (created by nb05) |
+| `./diffusion_epoch0030.pt` | Old 30-epoch checkpoint (out_ch=1 arch) |
+| `./logs/checkpoints/` | New checkpoints from nb06 training |
+| `./logs/figures/` | Saved plots (07_demo_brats_inference.png, 07_fullimage_denoise.png, etc.) |
+| `./logs/lora_training_log.json` | Legacy LoRA train/val loss log |
 | `./logs/thin_slice_split.json` | Subject ID lists per split + metadata |
-| `./logs/lora_training_log.json` | Train/val loss per epoch |
 
 ---
 
@@ -269,11 +280,13 @@ MONAI-compatible `torch.utils.data.Dataset`:
 | Modality | **T1w only** | Simplest starting point; extensible to T2/FLAIR later |
 | Acquisition filter | **Thin-slice only (<2 mm)** | Thick slices look fundamentally different; mixing corrupts model |
 | Normalisation | **Percentile [0.5, 99.5]** | Robust to MRI intensity outliers vs min-max |
-| Spatial size | **256×256** | Balances anatomical detail with compute on CPU/consumer GPU |
-| Slice selection | **1 random/subject/epoch** | Free temporal augmentation; low RAM footprint |
+| Spatial size | **256×256** | Balances anatomical detail with compute on consumer GPU |
+| Slice selection | **1 random/subject/epoch (training)** | Free temporal augmentation; low RAM footprint |
 | Augmentation | **Flip + small affine only** | Conservative — brain anatomy must stay realistic |
 | Fill threshold | **5%** | Removes near-empty edge slices; drops 28% of thin-slice candidates |
 | Z-range | **15%–85% of depth** | Removes top/bottom artifact-prone slices |
-| Parameter efficiency | **LoRA r=4 on attention linears** | <1% trainable params, fast training, easy to swap |
+| Out channels | **2 (noise + log_var)** | Enables learned variance → uncertainty map at inference |
+| Loss | **MSE + 0.001 × VLB** | VLB weight small enough not to destabilise MSE convergence |
 | Decode strategy | **DDPM inside mask, DDIM outside** | Stochastic where we want change; deterministic where we want preservation |
-| Scheduler | **DDPM train, DDIM inference** | DDIM gives 50-step decode vs 1000-step DDPM at same quality |
+| Uncertainty capture | **At encode_timestep before decode loop** | Captures model's prior confidence before any denoising steps alter the latent |
+| Anomaly signal | **recon_anomaly × uncertainty** | High only where model is BOTH wrong AND unsure — suppresses false positives |

@@ -69,7 +69,9 @@ desktop.ini
 _build_*.py
 *.tmp
 *.bak
-
+slice_cache/
+*.npy
+*.log
 # ── What IS tracked ──────────────────────────────────────────
 # (override ignores above for these specific files)
 !logs/.gitkeep
@@ -78,3 +80,4 @@ _build_*.py
 !logs/data_validation.json
 !logs/thin_slice_split.json
 !logs/lora_training_log.json
+wandb/

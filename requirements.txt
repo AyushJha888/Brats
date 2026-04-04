@@ -15,9 +15,10 @@ pillow==11.3.0
 nibabel==5.3.3
 
 # ── PyTorch  (CPU build — swap for CUDA/DirectML below) ──────
-torch==2.4.1
-torchvision==0.19.1
-torchaudio==2.4.1
+torch==2.6.0
+torchvision
+torchaudio
+
 
 # ── MONAI generative (DiffusionModelUNet, schedulers) ────────
 # monai[all] pulls einops + lpips which the UNet internals need
@@ -44,6 +45,8 @@ huggingface-hub==0.34.4
 # ── Misc utilities ───────────────────────────────────────────
 tqdm==4.67.1
 scikit-learn==1.6.1     # used for metrics (AUC) at evaluation stage
+
+matplotlib
 
 wandb 
 

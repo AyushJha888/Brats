@@ -45,6 +45,8 @@ huggingface-hub==0.34.4
 tqdm==4.67.1
 scikit-learn==1.6.1     # used for metrics (AUC) at evaluation stage
 
+wandb 
+
 # ============================================================
 #  GPU NOTES
 # ============================================================

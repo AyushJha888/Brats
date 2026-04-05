@@ -80,4 +80,5 @@ slice_cache/
 !logs/data_validation.json
 !logs/thin_slice_split.json
 !logs/lora_training_log.json
+wandb/run_training.sh
 wandb/

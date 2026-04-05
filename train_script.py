@@ -1,3 +1,4 @@
+print("This is a training script for a diffusion model on brain MRI slices. It discovers thin subjects, preprocesses volumes, builds a disk cache of slices, and trains a UNet-based diffusion model using PyTorch and W&B for logging.")
 import copy
 import json
 import logging
@@ -397,7 +398,10 @@ for epoch in range(1, N_EPOCHS + 1):
     if avg_val < best_val_loss:
         best_val_loss  = avg_val
         best_val_epoch = epoch
-        best_ckpt_path = CKPT_DIR / 'diffusion_best.pt'
+        log.info(f"  ★ New best val={avg_val:.5f} at epoch {epoch}")
+
+        # ── save locally ──────────────────────────────────────────────────
+        best_ckpt_path = CKPT_DIR / f'diffusion_best_e{epoch:04d}.pt'
         torch.save({
             'epoch'        : epoch,
             'unet'         : unet.state_dict(),
@@ -405,16 +409,19 @@ for epoch in range(1, N_EPOCHS + 1):
             'train_losses' : train_losses,
             'val_losses'   : val_losses,
         }, best_ckpt_path)
-        log.info(f"  ★ New best val={avg_val:.5f} at epoch {epoch}")
+        log.info(f"  Checkpoint saved → {best_ckpt_path.name}")
 
-        # upload weights-only to W&B (smaller)
-        weights_path = CKPT_DIR / f'diffusion_best_e{epoch:04d}_weights.pt'
-        torch.save(unet.state_dict(), weights_path)
-        art = wandb.Artifact(f"diffusion_best_e{epoch:04d}", type="model")
-        art.add_file(str(weights_path))
-        wandb.log_artifact(art)
-        wandb.log({"val/best_mse": avg_val, "val/best_epoch": epoch},
-                  step=epoch * len(train_loader))
+        # ── upload to W&B ─────────────────────────────────────────────────
+        try:
+            art = wandb.Artifact(f"diffusion_best_e{epoch:04d}", type="model")
+            art.add_file(str(best_ckpt_path))
+            logged_art = wandb.log_artifact(art)
+            logged_art.wait()
+            wandb.log({"val/best_mse": avg_val, "val/best_epoch": epoch},
+                    step=epoch * len(train_loader))
+            log.info(f"  Uploaded to W&B")
+        except Exception as e:
+            log.warning(f"  W&B upload failed (non-fatal): {e}")
 
     torch.cuda.empty_cache()
 
